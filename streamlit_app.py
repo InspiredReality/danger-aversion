@@ -189,3 +189,4 @@ def load_documents():
 # Load documents on startup
 if not st.session_state.documents:
     load_documents()
+    
