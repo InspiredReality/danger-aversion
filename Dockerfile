@@ -1,6 +1,6 @@
 FROM python:3.9-slim
 
-# Install system dependencies
+# Install all dependencies including ML libraries
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-eng \
@@ -12,22 +12,20 @@ RUN apt-get update && apt-get install -y \
     libxrender-dev \
     libgomp1 \
     wget \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # Copy and install Python dependencies
-COPY requirements.txt .
+COPY requirements-full.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Don't download model during build - it will download on first use
-# RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+# Pre-download the ML models
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
-# Copy application code
 COPY . .
 
-# Expose port
 EXPOSE 8000
 
-# Run the application
 CMD ["python", "main.py"]
