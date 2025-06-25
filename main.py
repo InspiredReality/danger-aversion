@@ -1,17 +1,11 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Optional
-import pytesseract
-from PIL import Image
-from pdf2image import convert_from_bytes
-import faiss
-import numpy as np
-import io
+from typing import List, Dict
 from datetime import datetime
-import os
+import io
 
-app = FastAPI(title="OCR RAG Demo with Real OCR")
+app = FastAPI(title="OCR Document Search - Fixed PDF Processing")
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,35 +15,54 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global variables
-embedder = None
+# Global storage
 documents: Dict[int, dict] = {}
 doc_counter = 0
-faiss_index = None
-indexed_chunks = []
+chunks_data = []
 
-# Initialize models on first request
-def get_embedder():
-    global embedder
-    if embedder is None:
-        print("Loading sentence transformer model (this may take a moment on first request)...")
-        try:
-            from sentence_transformers import SentenceTransformer
-            embedder = SentenceTransformer('all-MiniLM-L6-v2')
-            print("Model loaded successfully!")
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            # Fallback to simple search if model fails
-            embedder = "fallback"
-    return embedder
+# Test dependencies
+def check_dependencies():
+    status = {"tesseract": False, "poppler": False, "sentence_transformers": False}
+    
+    try:
+        import pytesseract
+        version = pytesseract.get_tesseract_version()
+        print(f"✅ Tesseract {version} available")
+        status["tesseract"] = True
+    except Exception as e:
+        print(f"❌ Tesseract error: {e}")
+    
+    try:
+        from pdf2image import convert_from_bytes
+        print("✅ Poppler available")
+        status["poppler"] = True
+    except Exception as e:
+        print(f"❌ Poppler error: {e}")
+    
+    try:
+        from sentence_transformers import SentenceTransformer
+        print("✅ Sentence Transformers available")
+        status["sentence_transformers"] = True
+    except Exception as e:
+        print(f"❌ Sentence Transformers error: {e}")
+    
+    return status
 
-# Initialize FAISS index
-def init_faiss():
-    global faiss_index
-    if faiss_index is None:
-        embedding_dimension = 384  # all-MiniLM-L6-v2 dimension
-        faiss_index = faiss.IndexFlatL2(embedding_dimension)
-    return faiss_index
+DEPS = check_dependencies()
+
+# Load AI model
+embedder = None
+search_type = "keyword"
+
+if DEPS["sentence_transformers"]:
+    try:
+        print("🔄 Loading AI model...")
+        from sentence_transformers import SentenceTransformer
+        embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        search_type = "semantic"
+        print("✅ AI model loaded!")
+    except Exception as e:
+        print(f"❌ AI model failed: {e}")
 
 class SearchRequest(BaseModel):
     query: str
@@ -58,14 +71,9 @@ class SearchRequest(BaseModel):
 @app.get("/")
 def root():
     return {
-        "message": "OCR RAG API with Real OCR",
-        "endpoints": {
-            "upload": "/api/upload",
-            "search": "/api/search", 
-            "documents": "/api/documents",
-            "health": "/api/health"
-        },
-        "note": "First request may be slow while models load"
+        "message": "OCR Document Search - Fixed PDF",
+        "search_type": search_type,
+        "dependencies": DEPS
     }
 
 @app.get("/api/health")
@@ -73,93 +81,161 @@ def health():
     return {
         "status": "healthy",
         "documents": len(documents),
-        "indexed_chunks": len(indexed_chunks),
-        "ocr": "pytesseract",
-        "embedder_loaded": embedder is not None
+        "chunks": len(chunks_data),
+        "search_type": search_type,
+        "dependencies": DEPS
     }
 
 def extract_text_from_image(image_bytes: bytes) -> tuple[str, float]:
-    """Extract text from image using Tesseract OCR"""
+    """Extract text from image using Tesseract"""
     try:
-        image = Image.open(io.BytesIO(image_bytes))
+        import pytesseract
+        from PIL import Image
         
-        # Convert to RGB if necessary
+        image = Image.open(io.BytesIO(image_bytes))
         if image.mode != 'RGB':
             image = image.convert('RGB')
         
         # Perform OCR
         text = pytesseract.image_to_string(image)
         
-        # Get confidence scores
+        # Get confidence
         try:
             data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
             confidences = [int(conf) for conf in data['conf'] if int(conf) > 0]
             avg_confidence = sum(confidences) / len(confidences) if confidences else 0
         except:
-            avg_confidence = 75.0  # Default confidence if calculation fails
+            avg_confidence = 75.0
         
         return text.strip(), avg_confidence
+        
     except Exception as e:
         print(f"OCR Error: {e}")
-        return "Error extracting text from image.", 0.0
+        return "", 0.0
 
 def extract_text_from_pdf(pdf_bytes: bytes) -> List[tuple[str, float]]:
-    """Extract text from PDF pages"""
+    """Extract text from PDF - FIXED VERSION"""
+    
+    # Check if we have the required dependencies
+    if not DEPS["poppler"]:
+        print("❌ Cannot process PDF: Poppler not available")
+        return [("", 0.0)]
+    
+    if not DEPS["tesseract"]:
+        print("❌ Cannot process PDF: Tesseract not available")
+        return [("", 0.0)]
+    
     try:
-        images = convert_from_bytes(pdf_bytes, dpi=200)
+        from pdf2image import convert_from_bytes
+        
+        print(f"📄 Converting PDF to images...")
+        
+        # Convert PDF pages to images
+        images = convert_from_bytes(
+            pdf_bytes,
+            dpi=150,
+            first_page=1,
+            last_page=5  # Process first 5 pages
+        )
+        
+        print(f"✅ Converted to {len(images)} images")
+        
         results = []
+        total_chars = 0
         
         for i, image in enumerate(images):
-            print(f"Processing page {i+1}/{len(images)}...")
-            # Convert PIL Image to bytes
+            print(f"🔍 OCR on page {i+1}/{len(images)}...")
+            
+            # Convert PIL image to bytes
             img_byte_arr = io.BytesIO()
             image.save(img_byte_arr, format='PNG')
-            img_byte_arr = img_byte_arr.getvalue()
+            img_bytes = img_byte_arr.getvalue()
             
-            text, confidence = extract_text_from_image(img_byte_arr)
-            results.append((text, confidence))
+            # Extract text from this page
+            page_text, page_confidence = extract_text_from_image(img_bytes)
+            
+            print(f"  Page {i+1}: {len(page_text)} chars, {page_confidence:.1f}% confidence")
+            
+            if page_text.strip():  # Only add pages with actual text
+                results.append((page_text, page_confidence))
+                total_chars += len(page_text)
+            else:
+                print(f"  Page {i+1}: No text found")
         
+        print(f"✅ PDF OCR complete: {total_chars} total characters from {len(results)} pages")
         return results
+        
     except Exception as e:
-        print(f"PDF Error: {e}")
-        return [("Error processing PDF.", 0.0)]
+        print(f"❌ PDF processing failed: {e}")
+        return [("", 0.0)]
 
-def create_chunks(text: str, chunk_size: int = 300, overlap: int = 50) -> List[str]:
-    """Split text into overlapping chunks"""
-    if not text:
-        return []
-    
+def create_chunks(text: str, chunk_size: int = 400, overlap: int = 50) -> List[str]:
+    """Split text into chunks"""
     chunks = []
     for i in range(0, len(text), chunk_size - overlap):
         chunk = text[i:i + chunk_size].strip()
         if len(chunk) > 50:
             chunks.append(chunk)
-    
     return chunks
 
 @app.post("/api/upload")
 async def upload_document(file: UploadFile = File(...)):
-    global doc_counter, indexed_chunks
+    global doc_counter
     
-    # Initialize models if needed
-    embedder_model = get_embedder()
-    index = init_faiss()
+    print(f"\n📤 Processing {file.filename}")
+    print(f"📋 Content type: {file.content_type}")
     
-    # Read file
     contents = await file.read()
+    file_size_mb = len(contents) / 1024 / 1024
+    print(f"📊 Size: {file_size_mb:.1f}MB")
     
-    # Extract text based on file type
+    if file_size_mb > 50:
+        raise HTTPException(400, f"File too large: {file_size_mb:.1f}MB")
+    
+    # Process the file
+    full_text = ""
+    avg_confidence = 0.0
+    ocr_type = "unknown"
+    
     if file.content_type == 'application/pdf':
+        print("📄 PDF file detected - processing with PDF pipeline")
+        
+        # Try real PDF processing first
         pages_results = extract_text_from_pdf(contents)
-        full_text = "\n\n--- PAGE BREAK ---\n\n".join([text for text, _ in pages_results])
-        avg_confidence = sum(conf for _, conf in pages_results) / len(pages_results) if pages_results else 0
+        
+        if pages_results and any(text.strip() for text, _ in pages_results):
+            # We got real text from PDF OCR
+            valid_pages = [(text, conf) for text, conf in pages_results if text.strip()]
+            all_texts = [text for text, _ in valid_pages]
+            all_confidences = [conf for _, conf in valid_pages]
+            
+            full_text = "\n\n--- PAGE BREAK ---\n\n".join(all_texts)
+            avg_confidence = sum(all_confidences) / len(all_confidences) if all_confidences else 0
+            ocr_type = "real_pdf"
+            
+            print(f"✅ PDF OCR successful: {len(full_text)} chars, {avg_confidence:.1f}% confidence")
+        else:
+            # PDF OCR failed
+            print("❌ PDF OCR failed - dependencies missing or error occurred")
+            raise HTTPException(400, "PDF processing failed. Check that Tesseract and Poppler are installed.")
+            
     elif file.content_type and file.content_type.startswith('image/'):
-        full_text, avg_confidence = extract_text_from_image(contents)
+        print("🖼️ Image file detected - processing with image OCR")
+        
+        if DEPS["tesseract"]:
+            full_text, avg_confidence = extract_text_from_image(contents)
+            ocr_type = "real_image"
+            print(f"✅ Image OCR: {len(full_text)} chars, {avg_confidence:.1f}% confidence")
+        else:
+            print("❌ Image OCR failed - Tesseract not available")
+            raise HTTPException(400, "Image OCR failed. Check that Tesseract is installed.")
     else:
         raise HTTPException(400, f"Unsupported file type: {file.content_type}")
     
-    if not full_text or len(full_text.strip()) < 10:
-        raise HTTPException(400, "Could not extract sufficient text from the document")
+    # Validate we got useful text
+    if len(full_text.strip()) < 20:
+        print(f"⚠️ Extracted text too short: '{full_text[:100]}...'")
+        raise HTTPException(400, f"Could not extract sufficient text. Got only {len(full_text)} characters.")
     
     # Store document
     doc_counter += 1
@@ -169,40 +245,26 @@ async def upload_document(file: UploadFile = File(...)):
         "text": full_text,
         "confidence": round(avg_confidence, 2),
         "uploaded_at": datetime.now().isoformat(),
-        "text_length": len(full_text)
+        "text_length": len(full_text),
+        "ocr_type": ocr_type
     }
     
-    # Create chunks and index them
+    # Create searchable chunks
     chunks = create_chunks(full_text)
+    for chunk in chunks:
+        chunks_data.append({
+            "doc_id": doc_counter,
+            "filename": file.filename,
+            "text": chunk,
+            "confidence": avg_confidence
+        })
     
-    # Only create embeddings if model loaded successfully
-    if embedder_model != "fallback":
-        for chunk in chunks:
-            try:
-                # Create embedding
-                embedding = embedder_model.encode([chunk])[0]
-                
-                # Add to FAISS index
-                index.add(np.array([embedding]).astype('float32'))
-                
-                # Store chunk metadata
-                indexed_chunks.append({
-                    "doc_id": doc_counter,
-                    "filename": file.filename,
-                    "text": chunk,
-                    "confidence": avg_confidence
-                })
-            except Exception as e:
-                print(f"Embedding error: {e}")
-    else:
-        # Fallback: store chunks without embeddings
-        for chunk in chunks:
-            indexed_chunks.append({
-                "doc_id": doc_counter,
-                "filename": file.filename,
-                "text": chunk,
-                "confidence": avg_confidence
-            })
+    print(f"✅ Document stored successfully:")
+    print(f"   ID: {doc_counter}")
+    print(f"   Text length: {len(full_text):,} characters")
+    print(f"   Chunks: {len(chunks)}")
+    print(f"   Confidence: {avg_confidence:.1f}%")
+    print(f"   OCR type: {ocr_type}")
     
     return {
         "success": True,
@@ -211,79 +273,88 @@ async def upload_document(file: UploadFile = File(...)):
         "text_length": len(full_text),
         "confidence": round(avg_confidence, 2),
         "chunks_created": len(chunks),
-        "message": f"Document processed with {len(chunks)} searchable chunks"
+        "search_type": search_type,
+        "ocr_type": ocr_type,
+        "message": f"Successfully processed {file.filename} with real OCR"
     }
 
 @app.post("/api/search")
 def search_documents(request: SearchRequest):
-    if not indexed_chunks:
+    if not chunks_data:
         return {
             "query": request.query,
             "results": [],
             "message": "No documents uploaded yet"
         }
     
-    embedder_model = get_embedder()
+    results = []
     
-    # If embedder failed, fallback to keyword search
-    if embedder_model == "fallback":
-        # Simple keyword search
-        results = []
+    # Semantic search if available
+    if search_type == "semantic" and embedder:
+        try:
+            print(f"🤖 Semantic search: '{request.query}'")
+            
+            query_embedding = embedder.encode([request.query])
+            chunk_texts = [chunk["text"] for chunk in chunks_data]
+            chunk_embeddings = embedder.encode(chunk_texts)
+            
+            from sklearn.metrics.pairwise import cosine_similarity
+            similarities = cosine_similarity(query_embedding, chunk_embeddings)[0]
+            
+            top_indices = similarities.argsort()[-request.limit:][::-1]
+            
+            for idx in top_indices:
+                if similarities[idx] > 0.1:
+                    chunk = chunks_data[idx]
+                    results.append({
+                        "document_id": chunk["doc_id"],
+                        "filename": chunk["filename"],
+                        "text": chunk["text"],
+                        "confidence": round(chunk["confidence"], 2),
+                        "relevance_score": round(float(similarities[idx]), 3)
+                    })
+            
+            print(f"✅ Found {len(results)} semantic matches")
+            
+        except Exception as e:
+            print(f"❌ Semantic search error: {e}")
+    
+    # Keyword search fallback
+    if not results:
+        print(f"🔍 Keyword search: '{request.query}'")
         query_lower = request.query.lower()
         
-        for chunk in indexed_chunks:
+        for chunk in chunks_data:
             if query_lower in chunk['text'].lower():
+                matches = chunk['text'].lower().count(query_lower)
+                words = len(chunk['text'].split())
+                score = matches / words if words > 0 else 0
+                
                 results.append({
                     "document_id": chunk['doc_id'],
                     "filename": chunk['filename'],
                     "text": chunk['text'],
                     "confidence": round(chunk['confidence'], 2),
-                    "relevance_score": chunk['text'].lower().count(query_lower) / len(chunk['text'].split())
+                    "relevance_score": round(score, 3)
                 })
         
-        # Sort by relevance
         results.sort(key=lambda x: x['relevance_score'], reverse=True)
         results = results[:request.limit]
-    else:
-        # Semantic search with embeddings
-        try:
-            query_embedding = embedder_model.encode([request.query])[0]
-            
-            # Search in FAISS
-            k = min(request.limit, len(indexed_chunks))
-            index = init_faiss()
-            distances, indices = index.search(
-                np.array([query_embedding]).astype('float32'), 
-                k
-            )
-            
-            # Format results
-            results = []
-            for idx, distance in zip(indices[0], distances[0]):
-                if idx < len(indexed_chunks):
-                    chunk = indexed_chunks[idx]
-                    results.append({
-                        "document_id": chunk['doc_id'],
-                        "filename": chunk['filename'],
-                        "text": chunk['text'],
-                        "confidence": round(chunk['confidence'], 2),
-                        "relevance_score": round(1 / (1 + float(distance)), 3)
-                    })
-        except Exception as e:
-            print(f"Search error: {e}")
-            return {"query": request.query, "error": "Search failed", "results": []}
+        
+        print(f"✅ Found {len(results)} keyword matches")
     
-    # Create answer
+    # Generate answer
     if results:
-        answer = f"Found {len(results)} relevant sections for '{request.query}' in your documents."
+        search_method = "AI semantic" if search_type == "semantic" else "keyword"
+        answer = f"Found {len(results)} relevant sections using {search_method} search"
     else:
-        answer = f"No relevant information found for '{request.query}'."
+        answer = f"No relevant information found for '{request.query}'"
     
     return {
         "query": request.query,
         "answer": answer,
         "results": results,
-        "search_type": "semantic" if embedder_model != "fallback" else "keyword"
+        "search_type": search_type
     }
 
 @app.get("/api/documents")
@@ -295,15 +366,29 @@ def list_documents():
                 "filename": doc["filename"],
                 "confidence": doc["confidence"],
                 "text_length": doc["text_length"],
-                "uploaded_at": doc["uploaded_at"]
+                "uploaded_at": doc["uploaded_at"],
+                "ocr_type": doc.get("ocr_type", "unknown")
             }
             for doc in documents.values()
         ],
         "total": len(documents),
-        "total_chunks": len(indexed_chunks)
+        "total_chunks": len(chunks_data),
+        "dependencies": DEPS
     }
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    print(f"\n🚀 Starting OCR Document Search")
+    print(f"📋 Available dependencies:")
+    for dep, available in DEPS.items():
+        status = "✅" if available else "❌"
+        print(f"   {status} {dep}")
+    
+    if DEPS["poppler"] and DEPS["tesseract"]:
+        print("🎉 PDF + Image OCR ready!")
+    elif DEPS["tesseract"]:
+        print("📷 Image OCR only")
+    else:
+        print("❌ No OCR available")
+    
+    uvicorn.run(app, host="0.0.0.0", port=8000)
