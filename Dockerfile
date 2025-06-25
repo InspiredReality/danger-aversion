@@ -1,13 +1,12 @@
-# Multi-stage build for Railway deployment
 # ==========================================
-# Stage 1: Model Download (discarded after build)
+# Stage 1: Model Download
 # ==========================================
 FROM python:3.9-slim as model-downloader
 
-# Install system dependencies for model download
+# Install dependencies for model download
 RUN apt-get update && apt-get install -y git wget && rm -rf /var/lib/apt/lists/*
 
-# Install specific compatible versions for model download
+# Install ML packages
 RUN pip install --no-cache-dir \
     torch==2.1.0+cpu \
     sentence-transformers==2.2.2 \
@@ -15,45 +14,17 @@ RUN pip install --no-cache-dir \
     huggingface-hub==0.17.3 \
     --index-url https://download.pytorch.org/whl/cpu
 
-# Create model cache directory
+# Create model directory
 RUN mkdir -p /tmp/models
 
-# Download model with verbose logging
-RUN python -c "
-import os
-print('=== Starting model download ===')
-os.makedirs('/tmp/models', exist_ok=True)
+# Create the download script as a separate file
+COPY download_model.py /tmp/download_model.py
 
-from sentence_transformers import SentenceTransformer
-print('Downloading all-MiniLM-L6-v2...')
-
-try:
-    model = SentenceTransformer('all-MiniLM-L6-v2', cache_folder='/tmp/models')
-    print('✅ Model downloaded successfully!')
-    
-    # Test the model
-    test_embedding = model.encode(['test sentence'])
-    print(f'✅ Model test passed! Embedding shape: {test_embedding.shape}')
-    
-    # List downloaded files
-    import os
-    for root, dirs, files in os.walk('/tmp/models'):
-        level = root.replace('/tmp/models', '').count(os.sep)
-        indent = ' ' * 2 * level
-        print(f'{indent}{os.path.basename(root)}/')
-        subindent = ' ' * 2 * (level + 1)
-        for file in files[:5]:  # Show first 5 files
-            print(f'{subindent}{file}')
-    
-except Exception as e:
-    print(f'❌ Model download failed: {e}')
-    raise e
-
-print('=== Model download complete ===')
-"
+# Run the download script
+RUN python3 /tmp/download_model.py
 
 # ==========================================
-# Stage 2: Production Image (final image)
+# Stage 2: Runtime Image
 # ==========================================
 FROM python:3.9-slim
 
@@ -70,22 +41,23 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /app
 
-# Copy requirements and install Python packages
-COPY requirements-railway.txt requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy requirements and install runtime packages
+COPY requirements-railway-runtime.txt requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip cache purge
 
-# Copy pre-downloaded models from build stage
+# Copy pre-downloaded models from stage 1
 COPY --from=model-downloader /tmp/models/ /app/models/
 
 # Verify models were copied
-RUN echo "=== Verifying models in production image ===" && \
-    ls -la /app/models/ && \
+RUN ls -la /app/models/ && \
     find /app/models -name "*.json" -o -name "*.bin" | head -5
 
 # Copy application code
-COPY . .
+COPY main.py streamlit_app.py ./
 
-# Set environment variables for model location
+# Set environment variables
 ENV SENTENCE_TRANSFORMERS_HOME=/app/models
 ENV TRANSFORMERS_CACHE=/app/models
 ENV HF_HOME=/app/models
@@ -95,8 +67,8 @@ ENV PYTHONUNBUFFERED=1
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:$PORT/api/health || exit 1
 
-# Expose port (Railway sets $PORT)
+# Expose port
 EXPOSE $PORT
 
 # Run the application
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port $PORT"]
+CMD uvicorn main:app --host 0.0.0.0 --port $PORT
