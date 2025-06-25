@@ -3,28 +3,48 @@
 # ==========================================
 FROM python:3.9-slim as model-downloader
 
-# Install dependencies for model download
-RUN apt-get update && apt-get install -y git wget && rm -rf /var/lib/apt/lists/*
+# Install git for downloading from huggingface
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 
-# Install ML packages
-RUN pip install --no-cache-dir \
-    torch==2.1.0+cpu \
-    sentence-transformers==2.2.2 \
-    transformers==4.35.0 \
-    huggingface-hub==0.17.3 \
-    --index-url https://download.pytorch.org/whl/cpu
+# Install ML packages with working versions
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir \
+    torch==2.0.1+cpu --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir \
+    sentence-transformers==2.5.1 \
+    transformers==4.40.2 \
+    huggingface-hub==0.22.2
 
 # Create model directory
 RUN mkdir -p /tmp/models
 
-# Create the download script as a separate file
-COPY download_model.py /tmp/download_model.py
+# Download model directly with Python commands
+RUN python3 -c "
+import os
+os.makedirs('/tmp/models', exist_ok=True)
+print('=== Starting model download ===')
 
-# Run the download script
-RUN python3 /tmp/download_model.py
+from sentence_transformers import SentenceTransformer
+print('Downloading all-MiniLM-L6-v2...')
+
+model = SentenceTransformer('all-MiniLM-L6-v2', cache_folder='/tmp/models')
+print('Model downloaded successfully!')
+
+# Test the model
+test_embedding = model.encode(['test'])
+print(f'Model test passed! Shape: {test_embedding.shape}')
+
+# Verify files exist
+for root, dirs, files in os.walk('/tmp/models'):
+    for file in files[:3]:
+        print(f'Found: {file}')
+        break
+
+print('=== Model download complete ===')
+"
 
 # ==========================================
-# Stage 2: Runtime Image
+# Stage 2: Runtime Image (Final)
 # ==========================================
 FROM python:3.9-slim
 
@@ -35,26 +55,22 @@ RUN apt-get update && apt-get install -y \
     poppler-utils \
     libgomp1 \
     curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+    && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
-# Copy requirements and install runtime packages
+# Copy requirements and install
 COPY requirements-railway-runtime.txt requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip cache purge
+    pip install --no-cache-dir -r requirements.txt
 
-# Copy pre-downloaded models from stage 1
+# Copy models from build stage
 COPY --from=model-downloader /tmp/models/ /app/models/
 
-# Verify models were copied
-RUN ls -la /app/models/ && \
-    find /app/models -name "*.json" -o -name "*.bin" | head -5
+# Verify models copied
+RUN ls -la /app/models/ || echo "Models directory empty"
 
-# Copy application code
+# Copy app files
 COPY main.py streamlit_app.py ./
 
 # Set environment variables
@@ -67,8 +83,6 @@ ENV PYTHONUNBUFFERED=1
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:$PORT/api/health || exit 1
 
-# Expose port
 EXPOSE $PORT
 
-# Run the application
 CMD uvicorn main:app --host 0.0.0.0 --port $PORT
