@@ -21,7 +21,7 @@ COPY backend/ .
 EXPOSE 8000
 
 # Models will download to default sentence-transformers cache location
-CMD ["gunicorn", "main_comparison_clean:app", \
+CMD ["gunicorn", "main_comparison:app", \
      "--workers", "1", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--bind", "0.0.0.0:8000", \
