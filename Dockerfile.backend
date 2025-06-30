@@ -1,3 +1,4 @@
+# Dockerfile.backend - Clean version
 FROM python:3.9-slim
 
 # Install system dependencies
@@ -17,16 +18,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code  
 COPY backend/ .
 
-# Set environment for model caching
-ENV SENTENCE_TRANSFORMERS_HOME=/tmp/ml_models
-RUN mkdir -p /tmp/ml_models
-
 EXPOSE 8000
 
-# Extended timeout for model downloads
-CMD ["gunicorn", "main_comparison:app", \
+# Models will download to default sentence-transformers cache location
+CMD ["gunicorn", "main_comparison_clean:app", \
      "--workers", "1", \
      "--worker-class", "uvicorn.workers.UvicornWorker", \
      "--bind", "0.0.0.0:8000", \
-     "--timeout", "600", \
-     "--keep-alive", "5"]
+     "--timeout", "600"]

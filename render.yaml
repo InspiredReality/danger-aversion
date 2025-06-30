@@ -1,4 +1,3 @@
-# render.yaml - Render deployment configuration
 services:
   - type: web
     name: ocr-rag-backend-comparison
@@ -6,14 +5,9 @@ services:
     dockerfilePath: ./Dockerfile.backend
     plan: starter
     healthCheckPath: /api/health
-    envVars:
-      - key: ENVIRONMENT
-        value: production
-      - key: SENTENCE_TRANSFORMERS_HOME
-        value: /tmp/ml_models
 
   - type: web
-    name: ocr-rag-frontend-comparison  
+    name: ocr-rag-frontend-comparison
     env: docker
     dockerfilePath: ./Dockerfile.frontend
     plan: starter
