@@ -1,0 +1,31 @@
+# docker-compose.yml - For local development
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - HF_API_KEY=${HF_API_KEY}
+    volumes:
+      - ml_models_cache:/tmp/ml_models  # Persist models between restarts
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://backend:8000
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  ml_models_cache:

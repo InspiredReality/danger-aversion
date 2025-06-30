@@ -1,0 +1,18 @@
+FROM python:3.9-slim
+
+WORKDIR /app
+
+COPY frontend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY frontend/ .
+
+# Streamlit config
+RUN mkdir -p ~/.streamlit
+RUN echo '[server]\nheadless = true\nport = 8501\naddress = "0.0.0.0"\n[browser]\ngatherUsageStats = false' > ~/.streamlit/config.toml
+
+EXPOSE 8501
+
+CMD ["streamlit", "run", "streamlit_app_comparison.py", \
+     "--server.port", "8501", \
+     "--server.address", "0.0.0.0"]

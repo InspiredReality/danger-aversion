@@ -1,0 +1,32 @@
+FROM python:3.9-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    poppler-utils \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy and install requirements
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code  
+COPY backend/ .
+
+# Set environment for model caching
+ENV SENTENCE_TRANSFORMERS_HOME=/tmp/ml_models
+RUN mkdir -p /tmp/ml_models
+
+EXPOSE 8000
+
+# Extended timeout for model downloads
+CMD ["gunicorn", "main_comparison:app", \
+     "--workers", "1", \
+     "--worker-class", "uvicorn.workers.UvicornWorker", \
+     "--bind", "0.0.0.0:8000", \
+     "--timeout", "600", \
+     "--keep-alive", "5"]
